@@ -3,7 +3,7 @@
 
 #include "llama-model-loader.h"
 #include "ggml.h"
-
+#include "llama-chat.h"
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -96,19 +96,96 @@ private:
     std::filesystem::path tmp_path;
 };
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    if (size < 32) {
-        return 0;
+void fuzz_chat_template(const uint8_t* data, size_t size) {
+    if (size < 10) return;
+
+    // Create chat messages from fuzzer data
+    std::vector<llama_chat_message> messages;
+    size_t pos = 0;
+
+    // Allocate strings to maintain lifetime
+    std::vector<std::string> content_storage;
+
+    while (pos + 4 < size) {
+        uint32_t msg_len = *(uint32_t*)(data + pos);
+        pos += 4;
+        if (pos + msg_len > size) break;
+
+        // Store content string
+        content_storage.emplace_back(std::string((char*)(data + pos), msg_len));
+
+        llama_chat_message msg;
+        msg.role = (msg_len % 3 == 0) ? "user" :
+                   (msg_len % 3 == 1) ? "assistant" : "system";
+        msg.content = content_storage.back().c_str(); // Use c_str() to get const char*
+        messages.push_back(msg);
+        pos += msg_len;
     }
+
+    std::vector<const llama_chat_message*> msg_ptrs;
+    for (const auto& msg : messages) {
+        msg_ptrs.push_back(&msg);
+    }
+
+    std::string result;
+    for (llm_chat_template tmpl = LLM_CHAT_TEMPLATE_UNKNOWN;
+         tmpl <= LLM_CHAT_TEMPLATE_MEGREZ;
+         tmpl = (llm_chat_template)(tmpl + 1)) {
+        llm_chat_apply_template(tmpl, msg_ptrs, result, true);
+    }
+}
+
+void fuzz_tensor_validation(const uint8_t* data, size_t size) {
+    if (size < sizeof(int64_t) * 4) return;
+
+    std::vector<int64_t> dims;
+    for (size_t i = 0; i < 4 && i * sizeof(int64_t) < size; i++) {
+        dims.push_back(*(int64_t*)(data + i * sizeof(int64_t)));
+    }
+
+    try {
+        auto file = FuzzFile::from_bytes(data, size);
+        std::vector<std::string> splits; // Create vector first
+        llama_model_loader loader(file->get_path(), splits, false, true, nullptr); // Pass vector by reference
+
+        const char* tensor_names[] = {
+            "token_embd.weight",
+            "output_norm.weight",
+            "output.weight"
+        };
+
+        for (const auto& name : tensor_names) {
+            loader.check_tensor_dims(name, dims, false);
+        }
+    } catch (...) {}
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+    if (size < 32) return 0;
     if (size > 100000) return 0;
 
     try {
+        // Existing GGUF format fuzzing
         std::vector<std::string> splits;
         const bool use_mmap = rand() % 2 == 1;
         const bool check_tensors = rand() % 2 == 1;
 
         auto file = FuzzFile::from_bytes(data, size);
         llama_model_loader loader(file->get_path(), splits, use_mmap, check_tensors, nullptr);
+
+        // Add chat template fuzzing
+        fuzz_chat_template(data, size);
+
+        // Add tensor validation fuzzing
+        fuzz_tensor_validation(data, size);
+
+        // Fuzz model metadata
+        if (size > 8) {
+            std::string key(data, data + 8);
+            std::string result;
+            loader.get_key(key, result, false);
+        }
+
     } catch (...) {
         return 0;
     }
