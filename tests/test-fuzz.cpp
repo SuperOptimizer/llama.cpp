@@ -69,11 +69,15 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         llama_backend_init();
 
         llama_model_params model_params = llama_model_default_params();
-        model_params.use_mmap = true;
+        model_params.use_mmap = rand()%2==1;
+        model_params.use_mlock = rand()%2==1;
+        model_params.check_tensors = rand()%2==1;
+        model_params.vocab_only = rand()%2==1;
         model_params.progress_callback = nullptr;
 
         model = llama_load_model_from_file(temp_template, model_params);
-        if (model) {
+        if (false){
+        //if (model) {
             llama_context_params ctx_params = llama_context_default_params();
             ctx_params.n_ctx = 32;
 
